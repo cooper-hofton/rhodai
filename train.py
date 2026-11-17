@@ -2,7 +2,7 @@
 
 Run from the Scripts folder:
     python train.py
-or in a notebook:
+or in a notebook (including Colab, see rhodai_colab.ipynb):
     from train import CONFIG, run
     CONFIG["tile_size_px"] = 500
     run(CONFIG)
@@ -46,6 +46,8 @@ CONFIG = {
     "weights": "imagenet",             # None = random start (testing only)
     "train_base": True,                # True = fine-tune all of MobileNetV2; False = train the head only
     "dropout": 0.2,
+    "weight_decay": None,              # e.g. 1e-4 = AdamW with decoupled weight decay; None = plain Adam
+    "mixed_precision": False,          # True on Colab's T4: about half the memory, faster
 
     # Training
     "learning_rate": 1e-4,
@@ -128,9 +130,11 @@ def build_model(cfg):
     inputs = keras.Input((size, size, 3))
     x = base(inputs, training=False)                                   # batch-norm layers stay in inference mode
     x = keras.layers.Dropout(cfg["dropout"])(x)
-    outputs = keras.layers.Dense(1, activation="sigmoid")(x)           # probability of rhododendron
+    outputs = keras.layers.Dense(1, activation="sigmoid", dtype="float32")(x)   # probability of rhododendron
     model = keras.Model(inputs, outputs)
-    model.compile(optimizer=keras.optimizers.Adam(cfg["learning_rate"]),
+    optimiser = (keras.optimizers.AdamW(cfg["learning_rate"], weight_decay=cfg["weight_decay"])
+                 if cfg.get("weight_decay") else keras.optimizers.Adam(cfg["learning_rate"]))
+    model.compile(optimizer=optimiser,
                   loss="binary_crossentropy",
                   metrics=[keras.metrics.AUC(name="roc_auc"),
                            keras.metrics.AUC(curve="PR", name="avg_precision")])
@@ -178,6 +182,9 @@ def run(cfg):
         raise FileExistsError(f"{report_path} already exists. Change run_name or delete it.")
     extras_dir = results_dir / cfg["run_name"]                     # only used if saving models/predictions
 
+    keras.mixed_precision.set_global_policy("mixed_float16" if cfg["mixed_precision"] else "float32")
+    gpus = tf.config.list_physical_devices("GPU")
+
     tiles = load_tiles(cfg)
     folds = cfg["folds"] if cfg["folds"] is not None else sorted(int(f) for f in tiles["fold"].unique())
     report = open(report_path, "w")
@@ -187,7 +194,8 @@ def run(cfg):
         report.write(text + "\n")
         report.flush()
 
-    log(f"Run {cfg['run_name']}  started {datetime.now():%Y-%m-%d %H:%M}")
+    log(f"Run {cfg['run_name']}  started {datetime.now():%Y-%m-%d %H:%M}  |  TensorFlow {tf.__version__}, "
+        f"GPU: {tf.config.experimental.get_device_details(gpus[0]).get('device_name', gpus[0].name) if gpus else 'none (CPU only)'}")
     log("Settings: " + json.dumps(cfg))
     log(f"{len(tiles)} images, {int(tiles['label'].sum())} positive, folds {folds}\n")
 
